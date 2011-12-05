@@ -40,25 +40,15 @@
 (declaim (ftype function deval))
 (declaim (ftype function do-apply))
 
+
+; use symbol-function
 (funcall
  #'(lambda ()
-     (let ((primitives (list
-			(cons '+ #'+)
-			(cons '- #'-)
-			(cons '* #'*)
-			(cons '/ #'/)
-			(cons 'cons #'cons)
-			(cons 'car #'car)
-			(cons 'cdr #'cdr)
-			(cons 'atom #'atom)
-			(cons 'eq #'eq)
-			(cons 'list #'list)
-			)
-		       ))
+     (let ((primitives (list '+ '- '* '/ 'cons 'cdr 'car 'atom 'eq 'list)))
        (defun lookup-primitive(f &optional (flist primitives))
 	 (if (and f flist)
-	     (if (eql f (caar flist))
-		 (cdar flist)
+	     (if (eql f (car flist))
+		 (symbol-function f)
 	       (lookup-primitive f (cdr flist)))))
        )))
 
@@ -121,9 +111,9 @@
 (defun lookup(sym env)
   (if env
       (cond
-       ((eql 'local (caar env))
+       ((eql 'local (car (car env)))
 	(multiple-value-bind
-	 (val present) (gethash sym (cadr env))
+	 (val present) (gethash sym (car (cdr (car env))))
 	 (if present
 	     val
 	   (lookup sym (cdr env))
@@ -174,7 +164,7 @@
    ((lookup-primitive func)
     (apply (lookup-primitive func) args))
    ((symbolp func)
-    (do-apply (getval func env) args env))
+    (do-apply (lookup func env) args env))
    ((and (listp func) ; the body of a func -- should be (lambda (...) ...)
 	 (eql (car func) 'lambda))
     (let ((params (get-lambda-params func))
@@ -190,6 +180,15 @@
    )
   )
 
+(defun strip-quote(expr)
+  (if (consp expr)
+      (if (eql (car expr) 'quote)
+	  (cdr expr)
+	(cons (strip-quote (car expr))
+	      (strip-quote (cdr expr)))
+	)
+    expr))
+	      
 (defun deval (expr env)
   (cond
    ((atom expr)
@@ -214,12 +213,15 @@
 	(do-def expr env))
        ((eql op 'dmap)
 	(do-dmap op (getargs expr env) env))
-       ((eql op 'eval) (deval (cadr expr) env))
-       (t (do-apply op (getargs (cdr expr) env) env))
+       ((eql op 'eval)
+	(if (eql 'quote (caadr expr))
+	    (deval (car (cdr (car (cdr expr)))) env)
+	  (deval (cadr expr) env)))
+       (t (print "do-apply") (do-apply op (getargs (cdr expr) env) env))
        )
       ))
 ; should never be reached?
-   (t expr))
+   (t (print "could not eval") expr))
   )
 
 ; ==========================================================================================
