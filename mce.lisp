@@ -214,10 +214,8 @@
        ((eql op 'dmap)
 	(do-dmap op (getargs expr env) env))
        ((eql op 'eval)
-	(if (eql 'quote (caadr expr))
-	    (deval (car (cdr (car (cdr expr)))) env)
-	  (deval (cadr expr) env)))
-       (t (print "do-apply") (do-apply op (getargs (cdr expr) env) env))
+	(deval (deval (cadr expr) env) env))
+       (t (do-apply op (getargs (cdr expr) env) env))
        )
       ))
 ; should never be reached?
