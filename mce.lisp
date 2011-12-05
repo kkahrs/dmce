@@ -19,14 +19,14 @@
 ; data types: atom (symbol number string) pair
 
 ; primitives:
-; quote atom eq cons car cdr cond
+; atom eq cons car cdr
 ; + - * /
-; apply eval list print
+; list print
 ; print-global-env
 ; make-thread wait-thread ????
 
 ; special forms:
-; def let lambda and or
+; def let lambda and or cond quote eval apply
 
 ; local implementation
 ; map
@@ -37,8 +37,54 @@
 
 ; all bindings must be remote references (even for local)
 
+(declaim (ftype function deval))
+(declaim (ftype function do-apply))
+
+(funcall
+ #'(lambda ()
+     (let ((primitives (list
+			(cons '+ #'+)
+			(cons '- #'-)
+			(cons '* #'*)
+			(cons '/ #'/)
+			(cons 'cons #'cons)
+			(cons 'car #'car)
+			(cons 'cdr #'cdr)
+			(cons 'atom #'atom)
+			(cons 'eq #'eq)
+			(cons 'list #'list)
+			)
+		       ))
+       (defun lookup-primitive(f &optional (flist primitives))
+	 (if (and f flist)
+	     (if (eql f (caar flist))
+		 (cdar flist)
+	       (lookup-primitive f (cdr flist)))))
+       )))
+
+
 (defun gethostname () "localhost")
 (defvar *port* 8000)
+
+(defun set-global (key val) key val)
+(defun lookup-global (key) key ())
+
+
+(defun make-frame () (list 'local (make-hash-table)))
+(defun put-to-frame (key val frame) (setf (gethash key (cadr frame)) val))
+(defun get-from-frame (key frame) (gethash key (cadr frame)))
+(defun make-remote-frame (host port id)
+  (list 'remote host port id))
+(defun make-env () (list (make-frame)))
+
+
+(defun extend-env(keys values env)
+  (let ((frame (make-frame)))
+    (map 'list #'(lambda (key val) (put-to-frame key val frame)) keys values)
+    (cons frame env))
+  )
+
+
 
 ; keep REMOTE_TYPE secret
 (funcall
@@ -70,6 +116,80 @@
        ))
  )
 
+(defun lookup-remote(sym env) sym env ())
+
+(defun lookup(sym env)
+  (if env
+      (cond
+       ((eql 'local (caar env))
+	(multiple-value-bind
+	 (val present) (gethash sym (cadr env))
+	 (if present
+	     val
+	   (lookup sym (cdr env))
+	   ))
+	)
+       ((eql 'remote (car env))
+	(lookup-remote sym env))
+       (t (lookup-global sym)) ; should never happen -- probably indicates malformed env
+       )
+    (lookup-global sym)
+    )
+  )
+
+
+(defun do-dmap (f lst env)
+  (if lst
+      (cons (do-apply f (car lst) env)
+	    (do-dmap f (cdr lst) env))))
+
+(defun do-let (expr env)
+  ; deval bindings -> new env
+  ; (let (list of (list sym val))  body)
+  (let ((vars (map 'list #'car (cadr expr)))
+	(values (map 'list #'(lambda (xpr) (deval (cadr xpr) env)) (cadr expr)))
+	(body (caddr expr))
+	)
+    (let ((env (extend-env vars values env)))
+      (deval body env)
+      )
+    )
+  )
+
+(defun do-def (expr env)
+  (let ((sym (cadr expr))
+	(val (deval (caddr expr) env)))
+    (set-global sym val))
+  )
+; expr must be a local list
+(defun getargs(expr env) (map 'list #'(lambda (xpr) (deval xpr env)) expr))
+
+(defun getop(expr)
+  (car expr))
+  
+(defun do-apply(func args env)
+  (cond
+   ((remotep func)
+    (do-apply (fetch-remote func) args env))
+   ((lookup-primitive func)
+    (apply (lookup-primitive func) args))
+   ((symbolp func)
+    (do-apply (getval func env) args env))
+   ((and (listp func) ; the body of a func -- should be (lambda (...) ...)
+	 (eql (car func) 'lambda))
+    (let ((params (get-lambda-params func))
+	  (body (get-lambda-body func))
+	  )
+      (let ((env (extend-env params args env))
+	    )
+	(car (last (map 'list #'(lambda (expr) (deval expr env)) body)))
+
+
+    )))
+   (t nil) ; default -- should throw error
+   )
+  )
+
 (defun deval (expr env)
   (cond
    ((atom expr)
@@ -93,54 +213,22 @@
        ((eql op 'def)
 	(do-def expr env))
        ((eql op 'dmap)
-	(do-dmap (getargs expr env) env))
+	(do-dmap op (getargs expr env) env))
        ((eql op 'eval) (deval (cadr expr) env))
-       (t (do-apply op (getargs expr env) env))
+       (t (do-apply op (getargs (cdr expr) env) env))
        )
       ))
+; should never be reached?
    (t expr))
-
   )
 
-; expr must be a local list
-(defun getargs(expr env)
-  (if expr (cons (deval (car expr) env)
-		 (getargs (cdr expr) env))))
-
-(defun getop(expr)
-  (car expr))
-  
-(defun do-apply(func args env)
-  (cond
-   ((remotep func)
-    (do-apply (fetch-remote func) args env))
-   ((primitivep func)
-    (apply (lookup-primitive func) args))
-   ((symbolp func)
-    (do-apply (getval func env) args env))
-   ((and (listp func) ; the body of a func -- should be (lambda (...) ...)
-	 (eql (car func) 'lambda))
-    (let ((params (get-lambda-params func))
-	  (body (get-lambda-body func))
-	  )
-      (let ((env (extend-env params args env))
-	    )
-	(car (last (map #'(lambda (expr) (deval expr env)) body)))
-
-
-    )))
-   (t nil) ; default -- should throw error
-   )
-  )
-
-
+; ==========================================================================================
 (defun prompt ()
   (format t "~%> ")
   (finish-output)
   )
 
 
-(defun make-env () (list ()))
 
 (defun dlisp(&optional (env (make-env)))
   (prompt)
