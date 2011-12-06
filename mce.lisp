@@ -42,23 +42,30 @@
 
 
 ; use symbol-function
-(funcall
- #'(lambda ()
-     (let ((primitives (list '+ '- '* '/ 'cons 'cdr 'car 'atom 'eq 'list)))
-       (defun lookup-primitive(f &optional (flist primitives))
-	 (if (and f flist)
-	     (if (eql f (car flist))
-		 (symbol-function f)
-	       (lookup-primitive f (cdr flist)))))
-       )))
+(let ((primitives (list 'not '> '< '= '+ '- '* '/ 'atom 'eq 'print-global-env 'cons 'list 
+					; need custom implementation
+			'car 'cdr 'print
+			)))
+  (defun lookup-primitive(f &optional (flist primitives))
+    (if (and f flist)
+	(if (eql f (car flist))
+	    (symbol-function f)
+	  (lookup-primitive f (cdr flist)))))
+  )
 
 
 (defun gethostname () "localhost")
 (defvar *port* 8000)
 
-(defun set-global (key val) key val)
-(defun lookup-global (key) key ())
+(defparameter *global-keys* (make-hash-table))
+(defun set-global (key val) (setf (gethash key *global-keys*) val))
+(defun lookup-global (key) key (gethash key *global-keys*))
 
+(defun print-global-env ()
+  (format t "~%")
+  (maphash #'(lambda (key val) (format t "key ~a val ~a~%" key val)) *global-keys*)
+  (finish-output)
+  nil)
 
 (defun make-frame () (list 'local (make-hash-table)))
 (defun put-to-frame (key val frame) (setf (gethash key (cadr frame)) val))
@@ -77,39 +84,38 @@
 
 
 ; keep REMOTE_TYPE secret
-(funcall
- #'(lambda ()
+
 					; just need something unique to share between cluster nodes
-     (let ((REMOTE_TYPE "c7ad5a0a-1f43-4756-8dc8-0cb4926318ec")
-	   (datastore (make-hash-table))
-	   )
-       
-       (defun remotep(item)
-	 (and (consp item) (eql (car item) REMOTE_TYPE)))
-       (defun make-remote(item)
-	 (let ((ref (list REMOTE_TYPE (gethostname) *port* (gensym))))
-	   (setf (gethash (remote-sym ref) datastore) item)
-	   ref
-	   )
-	 )
+(let ((REMOTE_TYPE "c7ad5a0a-1f43-4756-8dc8-0cb4926318ec")
+      (datastore (make-hash-table))
+      )
+  
+  (defun remotep(item)
+    (and (consp item) (eql (car item) REMOTE_TYPE)))
+  (defun make-remote(item)
+    (let ((ref (list REMOTE_TYPE (gethostname) *port* (gensym))))
+      (setf (gethash (remote-sym ref) datastore) item)
+      ref
+      )
+    )
 					; should not be used yet?
-       (defun set-remote(remote item)
-	 (setf (gethash (remote-sym remote) datastore) item))
-       
+  (defun set-remote(remote item)
+    (setf (gethash (remote-sym remote) datastore) item))
+  
 					; check hostname, call remote host or fetch local
-       (defun remote-val(remote)
-	 (gethash (remote-sym remote) datastore))
-       (defun remote-sym(remote)
-	 (if (remotep remote) (cadddr remote)))
-       
-       
-       ))
- )
+  (defun remote-val(remote)
+    (gethash (remote-sym remote) datastore))
+  (defun remote-sym(remote)
+    (if (remotep remote) (cadddr remote)))
+  
+  
+  )
+
 
 (defun lookup-remote(sym env) sym env ())
 
 (defun lookup(sym env)
-  (if env
+  (if (and env sym)
       (cond
        ((eql 'local (car (car env)))
 	(multiple-value-bind
@@ -133,30 +139,46 @@
       (cons (do-apply f (car lst) env)
 	    (do-dmap f (cdr lst) env))))
 
+(defun do-progn(body env)
+  (car (last (map
+	      'list
+	      #'(lambda (expr) (deval expr env))
+	      body)
+	     )))
+
 (defun do-let (expr env)
-  ; deval bindings -> new env
-  ; (let (list of (list sym val))  body)
   (let ((vars (map 'list #'car (cadr expr)))
 	(values (map 'list #'(lambda (xpr) (deval (cadr xpr) env)) (cadr expr)))
-	(body (caddr expr))
+	(body (cddr expr))
 	)
     (let ((env (extend-env vars values env)))
-      (deval body env)
+      (do-progn body env)
       )
     )
   )
 
+
 (defun do-def (expr env)
   (let ((sym (cadr expr))
 	(val (deval (caddr expr) env)))
-    (set-global sym val))
+    (if (symbolp sym)
+	(set-global sym val)
+      (progn (print (list "not a symbol" sym))
+	     nil)
+      )
+    )
   )
 ; expr must be a local list
 (defun getargs(expr env) (map 'list #'(lambda (xpr) (deval xpr env)) expr))
 
 (defun getop(expr)
   (car expr))
-  
+
+; (lambda (env) (arg1 arg2 ...) expr expr ... )
+(defun get-lambda-params(func) (caddr func))
+(defun get-lambda-body(func) (cdddr func))
+(defun fetch-remote(func) func nil)
+
 (defun do-apply(func args env)
   (cond
    ((remotep func)
@@ -166,14 +188,14 @@
    ((symbolp func)
     (do-apply (lookup func env) args env))
    ((and (listp func) ; the body of a func -- should be (lambda (...) ...)
-	 (eql (car func) 'lambda))
+	 (eql (car func) 'lambda)) ; check that func has been devaled and has attached env
     (let ((params (get-lambda-params func))
 	  (body (get-lambda-body func))
 	  )
       (let ((env (extend-env params args env))
 	    )
-	(car (last (map 'list #'(lambda (expr) (deval expr env)) body)))
-
+;	(car (last (map 'list #'(lambda (expr) (deval expr env)) body)))
+	(do-progn body env)
 
     )))
    (t nil) ; default -- should throw error
@@ -188,11 +210,43 @@
 	      (strip-quote (cdr expr)))
 	)
     expr))
-	      
+
+(defun devaled(op)
+  (and (cadr op) (listp (car (cadr op))))
+  )
+
+(defun do-or (expr env)
+  (if expr
+      (let ((elt (deval (car expr) env)))
+	(if elt
+	    elt
+	  (do-or (cdr expr) env)))))
+
+(defun do-and(expr env)
+  (if expr
+      (let ((elt (deval (car expr) env)))
+	(if elt
+	    (if (cdr expr)
+		(do-and (cdr expr) env)
+	      elt)
+	  t))
+    t
+    )
+  )
+
+(defun do-if(expr env)
+  ; predicate then else
+  (let ((pred (deval (car expr) env)))
+    (if pred
+	(deval (cadr expr) env)
+      (deval (caddr expr) env))))
+
+
 (defun deval (expr env)
   (cond
    ((atom expr)
     (cond
+     ((lookup-primitive expr) expr)     
      ((symbolp expr)
       (let ((val (lookup expr env)))
 	(if (remotep val)
@@ -206,16 +260,27 @@
        ((eql op 'quote)
 	(cadr expr))
        ((eql op 'lambda)
-	(cons 'lambda (cons env (cdr expr))))
+	(if (devaled expr)
+	    expr
+	  (cons 'lambda (cons env (cdr expr)))))
+       ((eql op 'or)
+	(do-or (cdr expr) env)
+	)
+       ((eql op 'and)
+	(do-and (cdr expr) env)
+	)
+       ((eql op 'if)
+	(do-if (cdr expr) env)
+	)
        ((eql op 'let)
 	(do-let expr env))
-       ((eql op 'def)
+       ((or (eql op 'def) (eql op 'define))
 	(do-def expr env))
        ((eql op 'dmap)
 	(do-dmap op (getargs expr env) env))
        ((eql op 'eval)
 	(deval (deval (cadr expr) env) env))
-       (t (do-apply op (getargs (cdr expr) env) env))
+       (t (do-apply (deval op env) (getargs (cdr expr) env) env))
        )
       ))
 ; should never be reached?
@@ -229,10 +294,9 @@
   )
 
 
-
 (defun dlisp(&optional (env (make-env)))
   (prompt)
-  (let ((expr (read *STANDARD-INPUT* () '(quit))))
+  (let ((expr (read *STANDARD-INPUT* nil '(quit))))
     (if (and (listp expr) (eql (car expr) 'quit) (not (cdr expr)))
 	expr
       (progn
