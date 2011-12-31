@@ -41,6 +41,55 @@
 (declaim (ftype function do-apply))
 
 
+
+; ("sbcl" "localhost" "8000")
+(cond
+ ((= 3 (length sb-ext:*posix-argv*))
+    (let ((host (read-from-string (cadr sb-ext:*posix-argv*)))
+	  (port (read-from-string (caddr sb-ext:*posix-argv*))))
+      (defvar *host* host)
+      (defvar *port* port)
+      (defvar *master-host-key* (list *host* *port*))
+      ))
+ ((= 5 (length sb-ext:*posix-argv*))
+    (let ((host (read-from-string (cadr sb-ext:*posix-argv*)))
+	  (port (read-from-string (caddr sb-ext:*posix-argv*)))
+	  (master-host (car (cdddr sb-ext:*posix-argv*)))
+	  (master-port (cadr (cdddr sb-ext:*posix-argv*)))
+	  )
+      (defvar *host* host)
+      (defvar *port* port)
+      (defvar *master-host-key* (list master-host master-port))
+      ))
+ (t
+  (progn
+    (defvar *host* "localhost")
+    (defvar *port* 8000)
+    (defvar *master-host-key* (list *host* *port*))
+    )
+  )
+ )
+(defvar *host-key* (list *host* *port*))
+
+(load "networkio.lisp")
+
+
+; threads
+; server
+; distributor
+; connections
+; n worker
+
+
+
+
+
+
+
+
+
+
+
 ; use symbol-function
 (let ((primitives (list 'not '> '< '= '+ '- '* '/ 'atom 'eq 'print-global-env 'cons 'list 
 					; need custom implementation
@@ -53,25 +102,31 @@
 	  (lookup-primitive f (cdr flist)))))
   )
 
+; contains table of <symbol, *host-key*> pairs indicating which host has physical storage for symbol
+(defparameter *global-keys* (make-hash-table :test #'equal))
 
-(defun gethostname () "localhost")
-(defvar *port* 8000)
+; contains table of <symbol, value> pairs as physical storage for global variables
+(defparameter *global-values* (make-hash-table))
 
-(defparameter *global-keys* (make-hash-table))
 (defun set-global (key val) (setf (gethash key *global-keys*) val))
-(defun lookup-global (key) key (gethash key *global-keys*))
+(defun lookup-global (key)
+  (let ((host-key (gethash key *global-keys*)))
+    (if (equal host-key *host-key*)
+	(gethash key *global-keys*)
+      ((format t "FIXME: need to look up key on ~A~%" host-key) ())
+      )))
 
 (defun print-global-env ()
   (format t "~%")
-  (maphash #'(lambda (key val) (format t "key ~a val ~a~%" key val)) *global-keys*)
+  (maphash #'(lambda (key val) (format t "key ~a val ~a~%" key val)) *global-values*)
   (finish-output)
   nil)
 
-(defun make-frame () (list 'local (make-hash-table)))
+(defun make-frame () (list :local (make-hash-table)))
 (defun put-to-frame (key val frame) (setf (gethash key (cadr frame)) val))
 (defun get-from-frame (key frame) (gethash key (cadr frame)))
 (defun make-remote-frame (host port id)
-  (list 'remote host port id))
+  (list :remote '(host port id)))
 (defun make-env () (list (make-frame)))
 
 
@@ -229,7 +284,7 @@
 	    (if (cdr expr)
 		(do-and (cdr expr) env)
 	      elt)
-	  t))
+	  nil))
     t
     )
   )
