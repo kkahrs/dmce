@@ -67,13 +67,12 @@
 (defparameter *global-keys* (make-hash-table :test #'equal))
 
 ;; ("sbcl" "localhost" "8000")
-
 (let* ((argc (length sb-ext:*posix-argv*))
        (argv sb-ext:*posix-argv*)
-       (host (if (> 2 argc) (nth 1 argv) "localhost"))
-       (port (if (> 2 argc) (nth 2 argv) 8000))
-       (master-host (if (> 4 argc) (nth 3 argv)))
-       (master-port (if (> 4 argc) (nth 4 argv))))
+       (host (if (< 2 argc) (nth 1 argv) "localhost"))
+       (port (if (< 2 argc) (read-from-string (nth 2 argv)) 8000))
+       (master-host (if (< 4 argc) (nth 3 argv) "localhost"))
+       (master-port (if (< 4 argc) (read-from-string (nth 4 argv)) 8000)))
   (defparameter *host* host)
   (defparameter *port* port)
   (defparameter *master-host-key* (list :host master-host :port master-port))
@@ -85,7 +84,7 @@
 
 (defun store-local (item)
   (if (and item (consp item))
-      (let ((key (gensym *sym-prefix*)))
+      (let ((key (gen-key-string)))
 	(setf (gethash key *local-memory*) item)
 	(list :stored *host-key* :key key))
     ;; atomic types do not need to be stored locally (maybe unless a very very long string?)
@@ -119,10 +118,10 @@
     (blocking-request *master-host-key* "lookup" key)))
 
 
-(defun lookup-remote(sym env)
+(defun lookup-remote (sym env)
   (blocking-request (getf env :location) "lookup" sym))
 
-(defun lookup(sym env)
+(defun lookup (sym env)
   (if (and env sym)
       (let ((id (getf env :frame))
 	    (hostspec (getf env :location)))
@@ -132,51 +131,66 @@
 	       (val present) (gethash sym storage)
 	       (if present
 		   val
-		 (lookup sym (cdr env)))))
+		 (lookup sym (getf env :parent)))))
 	  (lookup-remote sym env)))
     (lookup-global sym)))
 
 
-(defun send-data(hostspec expr)
-  (let ((lock (gethash hostspec *locks*))
-	(stream (gethash hostspec *connections*)))
-    (bt:with-lock-held (lock)
-		       (format stream "~A~%" expr)
-		       (force-output stream))))
+(defun send-data (hostspec expr)
+  (if (not (equal hostspec *host-key*))
+      (let ((lock (gethash hostspec *locks*))
+	    (stream (gethash hostspec *connections*)))
+	(if (and lock stream)
+	    (bt:with-lock-held
+	     (lock)
+	     (format stream "~S~%" expr)
+	     (force-output stream))
+	  (format t "could not send data to ~S~%" hostspec)))))
 
 
 (defun send-response (hostspec key expr)
-  (send-data hostspec (list :op 'response :key key :body expr)))
+  (send-data hostspec (list :op "response" :key key :body expr)))
 
 
 (defun receive-job (hostspec key body)
+  (print "got job")
+  (force-output)
   (bt:make-thread
    #'(lambda ()
        (let ((fn (car body))
 	     (arg (cadr body))
 	     (env (caddr body)))
-	 (send-response hostspec key (deval (list fn arg) env))))))
+	 (let ((val (deval (list fn arg) env)))
+	   (format t "deval returned ~S~%" val)
+	   (force-output)
+	   (send-response hostspec key val))))))
 
 
 (defun receive-response(key body)
   (let ((wait (gethash key *pending-requests*)))
+    (format t "got response for request ~S~%" (list key body (getf wait :key)))
+    (if (not wait) (print "failed to lookup wait obj for key"))
     (let ((condition (getf wait :condition))
 	  (lock (getf wait :lock)))
-      (bt:with-lock-held
-       (lock)
-       (setf (getf wait :returned) t)
-       (setf (getf wait :return) body)
-       (bt:condition-notify condition)))))
+      (if lock
+	  (bt:with-lock-held
+	   (lock)
+	   (setf (getf wait :returned) t)
+	   (setf (getf wait :return) body)
+	   (bt:condition-notify condition))
+	(print "lock is nil")))))
 
 
 (defun stream-reader (stream hostspec)
-  (setf (gethash hostspec *connections*) stream)
-  (setf (gethash hostspec *locks*) (bt:make-lock))
+  (bt:with-lock-held
+   (*connections-lock*)
+   (setf (gethash hostspec *connections*) stream)
+   (setf (gethash hostspec *locks*) (bt:make-lock)))
   (loop
    (let ((expr (read stream nil '(quit))))
      (if (equal expr '(quit))
-	 (return))
-     (handle-message hostspec expr))))
+	 (quit)
+       (handle-message hostspec expr)))))
 
 
 
@@ -184,20 +198,25 @@
 (defun peer-connect (hostspec)
   (bt:make-thread
    #'(lambda ()
-       (let ((connect
-	      (bt:with-lock-held
-	       (*connections-lock*)
-	       (if (and (not (equal hostspec *host-key*)) (not (gethash hostspec *connections*)))
-		   (setf (gethash hostspec *connections*) t)))))
-	 (if connect
-	     (let ((host (getf hostspec :host))
-		   (port (getf hostspec :port)))
-	       (with-open-client-socket
-		(stream host port)
-		(format stream "~A~%" *host-key*)
-		(force-output stream)
-		(stream-reader stream hostspec)))
-	   (format t "already connected to ~A~%" hostspec))))))
+       (let ((self-connect (equal hostspec *host-key*)))
+	 (if self-connect
+	     (print "connection to self attempted")
+	   (let ((new-connection
+		  (bt:with-lock-held
+		   (*connections-lock*)
+		   (if (not (gethash hostspec *connections*))
+		       (setf (gethash hostspec *connections*) t)))))
+	     (if new-connection
+		 (let ((host (getf hostspec :host))
+		       (port (getf hostspec :port)))
+		   (format t "connecting to ~S~%" hostspec)
+		   (force-output)
+		   (with-open-client-socket
+		    (stream host port)
+		    (format stream "~S~%" *host-key*)
+		    (force-output stream)
+		    (stream-reader stream hostspec)))
+	       (format t "already connected to ~S : ~S~%" hostspec new-connection))))))))
 
 
 (defun refresh-hostlist (hosts)
@@ -206,24 +225,27 @@
 
 
 (defun handle-message (hostspec expr)
+  (print (list hostspec expr))
+  (force-output)
   (let ((op (getf expr :op))
-	(key (intern (symbol-name (getf expr :key))))
+	(key (getf expr :key))
 	(body (getf expr :body)))
-
+    (format t "~%op ~S key ~S body ~S~%" op key body)
     ;; message types
     ;; response -- (:op 'response :key key :body response-expr)
     ;; job -- (:op 'run :key key :body (fn arg env-id))
     ;; lookup -- (:op 'lookup :key key :body (:sym sym :env env-id))
     ;; fetch -- (:op 'fetch :key key :body mem-key)
     ;; hosts -- (:op 'hosts :key nil :body (list of hostspecs for all known hosts))
-    (case op
+    (cond
 	  ;; initiate local action on request from remote
-	  ("run" (receive-job hostspec key body))
-	  ("lookup" (send-response hostspec key (lookup (getf body :sym) (getf body :env))))
-	  ("fetch" (send-response hostspec key (fetch body)))
-	  ;; receive results of remote action
-	  ("response" (receive-response key body))
-	  ("hosts" (refresh-hostlist body)))))
+     ((equal op "run") (receive-job hostspec key body))
+     ((equal op "lookup") (send-response hostspec key (lookup (getf body :sym) (getf body :env))))
+     ((equal op "fetch") (send-response hostspec key (fetch body)))
+     ;; receive results of remote action
+     ((equal op "response") (receive-response key body))
+     ((equal op "hosts") (refresh-hostlist body))
+     (t (print "invalid op")))))
 
 
 
@@ -232,21 +254,27 @@
 
 (defun await-response (wait)
   (let ((condition (getf wait :condition))
-	(lock (getf wait :lock))
-	(key (getf wait :key)))
+	(lock (getf wait :lock)))
     (loop
      (bt:with-lock-held
       (lock)
       (if (getf wait :returned)
-	  (progn
-	    (setf (gethash key *pending-requests*) nil)
-	    (return (getf wait :return)))
+	  (return (getf wait :return))
 	(bt:condition-wait condition lock))))))
 
+(defun gen-key-string ()
+  (symbol-name (gensym *sym-prefix*)))
+
+(defun create-wait-obj ()
+  (list :key (gen-key-string)
+	:condition (bt:make-condition-variable)
+	:lock (bt:make-lock)
+	:return nil
+	:returned nil))
 
 
 (defun blocking-request (hostspec op expr)
-  (let ((wait (list :key (gensym *sym-prefix*) :condition (bt:make-condition-variable) :lock (bt:make-lock) :return nil :returned nil)))
+  (let ((wait (create-wait-obj)))
     (let ((key (getf wait :key)))
       (setf (gethash key *pending-requests*) wait)
       (send-data hostspec (list :op op :key key :body expr))
@@ -254,32 +282,35 @@
 
 
 (defun send-job (hostspec key fn arg env)
-  (send-data hostspec (list :op 'run :key key
+  (send-data hostspec (list :op "run" :key key
 			    :body (list fn (lazy-marshall arg) env))))
 
 (defun launch-local-job (wait fn arg env)
   (bt:make-thread
    #'(lambda ()
-       (let ((condition (getf wait :condition))
-	     (val (deval (list fn arg) env)))
-	 (bt:with-lock-held (condition)	  
-			    (setf (getf wait :return) val)
-			    (setf (getf wait :returned) t)
-			    (bt:condition-notify condition))))))
+       (let ((val (deval (list fn arg) env)))
+	 (bt:with-lock-held
+	  ((getf wait :lock))	  
+	  (setf (getf wait :return) val)
+	  (setf (getf wait :returned) t)
+	  (bt:condition-notify (getf wait :condition)))))))
 
 (defun launch-job (hostspec fn arg env)
-  (let ((wait (list :key (gensym *sym-prefix*)
-		    :condition (bt:make-condition-variable) :return nil :returned nil)))
-    (setf (gethash (car wait) *pending-requests*) (cdr wait))
+  (format t "launching job ~S~%" (list :hostspec hostspec :fn fn :arg arg :env env))
+  (force-output)
+  (let ((wait (create-wait-obj)))
+    (setf (gethash (getf wait :key) *pending-requests*) wait)
     (if (equal hostspec *host-key*)
-	(launch-local-job (cdr wait) fn arg env)
-      (let ((key (car wait)))
-	(send-job hostspec key fn arg env)))
+	(launch-local-job wait fn arg env)
+      (send-job hostspec (getf wait :key) fn arg env))
     wait))
 
 
 (defun get-hostlist ()
-  (maphash #'(lambda (key val) val key) *connections*))
+  (cons *host-key*
+	(let ((remote-list nil))
+	  (maphash #'(lambda (key val) val (setf remote-list (cons key remote-list))) *connections*)
+	  remote-list)))
 
 
 (defun start-server (host port)
@@ -288,8 +319,10 @@
    #'(lambda (stream)
        (declare (type stream stream))
        (let ((hostspec (read stream nil)))
-	 (let ((hostlist-command (list :op 'hosts :key nil :body (cons hostspec (get-hostlist)))))
-	   (format stream "~A~%" hostlist-command)
+	 (format t "got connection from ~S~%" hostspec)
+	 (force-output)
+	 (let ((hostlist-command (list :op "hosts" :key nil :body (cons hostspec (get-hostlist)))))
+	   (format stream "~S~%" hostlist-command)
 	   (map 'list #'(lambda(host) (send-data host hostlist-command))
 		(get-hostlist)))
 	 (force-output stream)
@@ -299,30 +332,9 @@
    :in-new-thread t))
 
 
-
-
-
-
-
-
-
-
-
-
-
-					; threads
-					; server
-					; distributor
-					; connections
-					; n worker
-
-
-
-
-					; use symbol-function
 (defun lookup-primitive (f &optional (flist (list 'not '> '< '= '+ '- '* '/
 						  'atom 'eq 'cons 'list 'print
-						  'print-global-env)))
+						  'print-global-env 'get-hostlist)))
   (if (and f flist)
       (if (eql f (car flist))
 	  (symbol-function f)
@@ -332,7 +344,7 @@
   (if (consp arg)
       (let ((val (funcall op arg)))
 	(if (and arg val (consp val) (eq :stored (car val)))
-	    (blocking-request (getf val :stored) 'fetch (getf val :key))
+	    (blocking-request (getf val :stored) "fetch" (getf val :key))
 	  val))
     (print "car or cdr of non-cons should be error")))
 
@@ -341,7 +353,7 @@
 					; contains table of <symbol, value> pairs as physical storage for global variables
 (defparameter *global-values* (make-hash-table))
 
-(defun set-global (key val) (setf (gethash key *global-keys*) val))
+(defun set-global (key val) (setf (gethash key *global-values*) val))
 
 (defun print-global-env ()
   (format t "~%")
@@ -350,7 +362,7 @@
   nil)
 
 (defun make-env (&optional (parent nil))
-  (let ((id (gensym *sym-prefix*))
+  (let ((id (gen-key-string))
 	(storage (make-hash-table)))
     (setf (gethash id *frames*) storage)
     ;; when a frame is returned from, if it has not had any remote calls it may be discarded safely
@@ -407,6 +419,7 @@
 
 (defun do-dmap (f lst env)
   (let ((lst (local-list lst)))
+    (print lst)
     (let ((wait-list
 	   (map 'list
 		#'(lambda (arg)
@@ -544,14 +557,15 @@
        ((or (eql op 'def) (eql op 'define))
 	(do-def expr env))
        ((eql op 'dmap)
-	(do-dmap op (getargs expr env) env))
+	(let ((args (getargs (cdr expr) env)))
+	  (do-dmap (car args) (cadr args)  env)))
        ((eql op 'eval)
 	(deval (deval (cadr expr) env) env))
        (t (do-apply (deval op env) (getargs (cdr expr) env) env)))))
 					; should never be reached?
    (t (print "could not eval") expr)))
 
-					; ==========================================================================================
+;; ==========================================================================================
 (defun prompt ()
   (format t "~%> ")
   (finish-output)
@@ -559,14 +573,14 @@
 
 
 (defun dlisp(&optional (env (make-env)))
-  (prompt)
+  (start-server *host* *port*)
+  (loop
+   (prompt)
   (let ((expr (read *STANDARD-INPUT* nil '(quit))))
-    (if (and (listp expr) (eql (car expr) 'quit) (not (cdr expr)))
-	expr
-      (progn
-	(print (deval expr env))
-	(dlisp env)))))
-
+     (if (and (listp expr) (eql (car expr) 'quit) (not (cdr expr)))
+	(return expr)
+      (print (deval expr env))))))
+	
 
 					; (with-input-from-string (stream "1 2 3 4") (let ((*STANDARD-INPUT* stream)) (dlisp)))
 
