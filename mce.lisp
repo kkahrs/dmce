@@ -62,9 +62,11 @@
 (defparameter *connections* (make-hash-table :test #'equal))
 (defparameter *locks* (make-hash-table :test #'equal))
 (defparameter *pending-requests* (make-hash-table :test #'equal))
-(defparameter *local-memory* (make-hash-table))
-(defparameter *frames* (make-hash-table))
-(defparameter *global-keys* (make-hash-table :test #'equal))
+(defparameter *local-memory* (make-hash-table :test #'equal))
+(defparameter *frames* (make-hash-table :test #'equal))
+;; contains table of <symbol, value> pairs as physical storage for global variables
+(defparameter *global-values* (make-hash-table))
+
 
 ;; ("sbcl" "localhost" "8000")
 (let* ((argc (length sb-ext:*posix-argv*))
@@ -81,9 +83,12 @@
 
 
 
+(defun gen-key-string ()
+  (symbol-name (gensym *sym-prefix*)))
+
 
 (defun store-local (item)
-  (if (and item (consp item))
+  (if (and item (consp item) (not (eq :stored (car item))))
       (let ((key (gen-key-string)))
 	(setf (gethash key *local-memory*) item)
 	(list :stored *host-key* :key key))
@@ -94,7 +99,7 @@
 
 
 (defun lazy-marshall (item)
-  (if (and item (consp item))
+  (if (and item (consp item) (not (equal :lambda (car item))))
       (let ((ca (store-local (car item)))
 	    (cd (store-local (cdr item))))
 	(cons ca cd))
@@ -108,18 +113,18 @@
 ;; fetch an unnamed memory location from this instance and return ready for network transport
 (defun fetch (memkey)
   (let ((val (fetch-local memkey)))
-    (if (and (consp val) (eql :lambda (car val)))
+    (if (and (consp val) (equal :lambda (car val)))
 	val
       (lazy-marshall val))))
 
-(defun lookup-global (key)
+(defun lookup-global (sym)
   (if (equal *host-key* *master-host-key*)
-      (gethash key *global-keys*)
-    (blocking-request *master-host-key* "lookup" key)))
+      (gethash sym *global-values*)
+    (blocking-request *master-host-key* "lookup" (list :sym sym :env nil))))
 
 
 (defun lookup-remote (sym env)
-  (blocking-request (getf env :location) "lookup" sym))
+  (blocking-request (getf env :location) "lookup" (list :sym sym :env env)))
 
 (defun lookup (sym env)
   (if (and env sym)
@@ -149,7 +154,7 @@
 
 
 (defun send-response (hostspec key expr)
-  (send-data hostspec (list :op "response" :key key :body expr)))
+  (send-data hostspec (list :op "response" :key key :body (lazy-marshall expr))))
 
 
 (defun receive-job (hostspec key body)
@@ -168,7 +173,7 @@
 
 (defun receive-response(key body)
   (let ((wait (gethash key *pending-requests*)))
-    (format t "got response for request ~S~%" (list key body (getf wait :key)))
+    (format t "got response for request ~S~%" (list key body))
     (if (not wait) (print "failed to lookup wait obj for key"))
     (let ((condition (getf wait :condition))
 	  (lock (getf wait :lock)))
@@ -225,8 +230,6 @@
 
 
 (defun handle-message (hostspec expr)
-  (print (list hostspec expr))
-  (force-output)
   (let ((op (getf expr :op))
 	(key (getf expr :key))
 	(body (getf expr :body)))
@@ -238,9 +241,12 @@
     ;; fetch -- (:op 'fetch :key key :body mem-key)
     ;; hosts -- (:op 'hosts :key nil :body (list of hostspecs for all known hosts))
     (cond
-	  ;; initiate local action on request from remote
+     ;; initiate local action on request from remote
      ((equal op "run") (receive-job hostspec key body))
-     ((equal op "lookup") (send-response hostspec key (lookup (getf body :sym) (getf body :env))))
+     ((equal op "lookup") (send-response
+			   hostspec key
+			   (lookup (intern (symbol-name (getf body :sym)))
+				   (getf body :env))))
      ((equal op "fetch") (send-response hostspec key (fetch body)))
      ;; receive results of remote action
      ((equal op "response") (receive-response key body))
@@ -261,9 +267,6 @@
       (if (getf wait :returned)
 	  (return (getf wait :return))
 	(bt:condition-wait condition lock))))))
-
-(defun gen-key-string ()
-  (symbol-name (gensym *sym-prefix*)))
 
 (defun create-wait-obj ()
   (list :key (gen-key-string)
@@ -332,9 +335,10 @@
    :in-new-thread t))
 
 
-(defun lookup-primitive (f &optional (flist (list 'not '> '< '= '+ '- '* '/
-						  'atom 'eq 'cons 'list 'print
-						  'print-global-env 'get-hostlist)))
+(defun lookup-primitive (f &optional
+			   (flist (list 'not '> '< '= '+ '- '* '/
+					'atom 'eq 'cons 'list 'print
+					'print-global-env 'get-hostlist 'copy-local)))
   (if (and f flist)
       (if (eql f (car flist))
 	  (symbol-function f)
@@ -349,9 +353,6 @@
     (print "car or cdr of non-cons should be error")))
 
 
-
-					; contains table of <symbol, value> pairs as physical storage for global variables
-(defparameter *global-values* (make-hash-table))
 
 (defun set-global (key val) (setf (gethash key *global-values*) val))
 
@@ -413,7 +414,7 @@
 (let ((counter 0))
   (defun get-next-host ()
     (let* ((hosts (get-hostlist))
-	  (index (mod counter (length hosts))))
+	   (index (mod counter (length hosts))))
       (setf counter (+ 1 counter))
       (nth index hosts))))
 
@@ -465,9 +466,10 @@
   (car expr))
 
 					; (lambda (env) (arg1 arg2 ...) expr expr ... )
-(defun get-lambda-params(func) (caddr func))
-(defun get-lambda-body(func) (cdddr func))
-(defun fetch-remote(func) func nil)
+(defun get-lambda-params (func) (caddr func))
+(defun get-lambda-env (func) (cadr func))
+(defun get-lambda-body (func) (cdddr func))
+(defun fetch-remote (func) func nil)
 
 (defun do-apply(func args env)
   (cond
@@ -478,11 +480,9 @@
    ((and (listp func) ; the body of a func -- should be (lambda (...) ...)
 	 (eql (car func) :lambda))
     (let ((params (get-lambda-params func))
-	  (body (get-lambda-body func))
-	  )
-      (let ((env (extend-env params args env))
-	    )
-					;	(car (last (map 'list #'(lambda (expr) (deval expr env)) body)))
+	  (body (get-lambda-body func)))
+      (let ((env (extend-env params args (get-lambda-env func))))
+	;;	(car (last (map 'list #'(lambda (expr) (deval expr env)) body)))
 	(do-progn body env)
 
 	)))
@@ -568,19 +568,29 @@
 ;; ==========================================================================================
 (defun prompt ()
   (format t "~%> ")
-  (finish-output)
-  )
+  (finish-output))
 
+(defun copy-local (expr)
+  (if (or (atom expr) (not expr))
+      expr
+    (if (eq (car expr) :stored)
+	;; FIXME: duplicate code
+	(blocking-request (getf expr :stored) "fetch" (getf expr :key))
+      (let ((ca (decons #'car expr))
+	    (cd (decons #'cdr expr)))
+	(cons (copy-local ca)
+	      (copy-local cd))))))
+  
+(defun local-print (expr)
+  (print (copy-local expr)))
 
 (defun dlisp(&optional (env (make-env)))
   (start-server *host* *port*)
   (loop
    (prompt)
-  (let ((expr (read *STANDARD-INPUT* nil '(quit))))
+   (let ((expr (read *STANDARD-INPUT* nil '(quit))))
      (if (and (listp expr) (eql (car expr) 'quit) (not (cdr expr)))
-	(return expr)
-      (print (deval expr env))))))
-	
+	 (return expr)
+       (local-print (deval expr env))))))
 
-					; (with-input-from-string (stream "1 2 3 4") (let ((*STANDARD-INPUT* stream)) (dlisp)))
 
