@@ -43,7 +43,7 @@
 (ql:quickload "bordeaux-threads")
 
 
-					; macro from http://paste.lisp.org/display/62851
+;; macro from http://paste.lisp.org/display/62851
 (defmacro with-open-client-socket ((socket address port) &body body)
   (let ((raw-socket (gensym)))
     `(let ((,raw-socket (usocket:socket-connect ,address ,port)))
@@ -58,6 +58,7 @@
 (declaim (ftype function handle-message))
 (declaim (ftype function do-apply))
 
+(defparameter *debug* 5)
 (defparameter *connections-lock* (bt:make-lock))
 (defparameter *connections* (make-hash-table :test #'equal))
 (defparameter *locks* (make-hash-table :test #'equal))
@@ -158,7 +159,6 @@
 
 
 (defun receive-job (hostspec key body)
-  (print "got job")
   (force-output)
   (bt:make-thread
    #'(lambda ()
@@ -166,14 +166,14 @@
 	     (arg (cadr body))
 	     (env (caddr body)))
 	 (let ((val (deval (list fn arg) env)))
-	   (format t "deval returned ~S~%" val)
+	   (if (< 2 *debug*) (format t "deval (job from ~S) returned ~S~%" hostspec val))
 	   (force-output)
 	   (send-response hostspec key val))))))
 
 
 (defun receive-response(key body)
   (let ((wait (gethash key *pending-requests*)))
-    (format t "got response for request ~S~%" (list key body))
+    (if (< 1 *debug*) (format t "got response for request ~S~%" (list key body)))
     (if (not wait) (print "failed to lookup wait obj for key"))
     (let ((condition (getf wait :condition))
 	  (lock (getf wait :lock)))
@@ -214,14 +214,14 @@
 	     (if new-connection
 		 (let ((host (getf hostspec :host))
 		       (port (getf hostspec :port)))
-		   (format t "connecting to ~S~%" hostspec)
+		   (if (< 1 *debug*) (format t "connecting to ~S~%" hostspec))
 		   (force-output)
 		   (with-open-client-socket
 		    (stream host port)
 		    (format stream "~S~%" *host-key*)
 		    (force-output stream)
 		    (stream-reader stream hostspec)))
-	       (format t "already connected to ~S : ~S~%" hostspec new-connection))))))))
+	       (if (< 3 *debug*) (format t "already connected to ~S : ~S~%" hostspec new-connection)))))))))
 
 
 (defun refresh-hostlist (hosts)
@@ -233,13 +233,13 @@
   (let ((op (getf expr :op))
 	(key (getf expr :key))
 	(body (getf expr :body)))
-    (format t "~%op ~S key ~S body ~S~%" op key body)
+    (if (< 2 *debug*) (format t "~%op ~S key ~S body ~S~%" op key body))
     ;; message types
-    ;; response -- (:op 'response :key key :body response-expr)
-    ;; job -- (:op 'run :key key :body (fn arg env-id))
-    ;; lookup -- (:op 'lookup :key key :body (:sym sym :env env-id))
-    ;; fetch -- (:op 'fetch :key key :body mem-key)
-    ;; hosts -- (:op 'hosts :key nil :body (list of hostspecs for all known hosts))
+    ;; response -- (:op "response" :key key :body response-expr)
+    ;; job -- (:op "run" :key key :body (fn arg env-id))
+    ;; lookup -- (:op "lookup" :key key :body (:sym sym :env env-id))
+    ;; fetch -- (:op "fetch" :key key :body mem-key)
+    ;; hosts -- (:op "hosts" :key nil :body (list of hostspecs for all known hosts))
     (cond
      ;; initiate local action on request from remote
      ((equal op "run") (receive-job hostspec key body))
@@ -265,7 +265,9 @@
      (bt:with-lock-held
       (lock)
       (if (getf wait :returned)
-	  (return (getf wait :return))
+	  (progn
+	    (remhash (getf wait :key) *pending-requests*)
+	    (return (getf wait :return)))
 	(bt:condition-wait condition lock))))))
 
 (defun create-wait-obj ()
@@ -299,7 +301,7 @@
 	  (bt:condition-notify (getf wait :condition)))))))
 
 (defun launch-job (hostspec fn arg env)
-  (format t "launching job ~S~%" (list :hostspec hostspec :fn fn :arg arg :env env))
+  (if (< 2 *debug*) (format t "launching job ~S~%" (list :hostspec hostspec :fn fn :arg arg :env env)))
   (force-output)
   (let ((wait (create-wait-obj)))
     (setf (gethash (getf wait :key) *pending-requests*) wait)
@@ -310,10 +312,12 @@
 
 
 (defun get-hostlist ()
-  (cons *host-key*
-	(let ((remote-list nil))
-	  (maphash #'(lambda (key val) val (setf remote-list (cons key remote-list))) *connections*)
-	  remote-list)))
+  (bt:with-lock-held
+   (*connections-lock*)
+   (cons *host-key*
+	 (let ((remote-list nil))
+	   (maphash #'(lambda (key val) val (setf remote-list (cons key remote-list))) *connections*)
+	   remote-list))))
 
 
 (defun start-server (host port)
@@ -322,23 +326,25 @@
    #'(lambda (stream)
        (declare (type stream stream))
        (let ((hostspec (read stream nil)))
-	 (format t "got connection from ~S~%" hostspec)
+	 (if (< 3 *debug*) (format t "got connection from ~S~%" hostspec))
 	 (force-output)
 	 (let ((hostlist-command (list :op "hosts" :key nil :body (cons hostspec (get-hostlist)))))
 	   (format stream "~S~%" hostlist-command)
-	   (map 'list #'(lambda(host) (send-data host hostlist-command))
-		(get-hostlist)))
-	 (force-output stream)
+	   (force-output stream))
 	 (stream-reader stream hostspec)))
    nil
    :multi-threading t
    :in-new-thread t))
 
 
+(defun get-hostkey () *host-key*)
+(defun set-debug (d) (setf *debug* d))
+
+
 (defun lookup-primitive (f &optional
 			   (flist (list 'not '> '< '= '+ '- '* '/
 					'atom 'eq 'cons 'list 'print
-					'print-global-env 'get-hostlist 'copy-local)))
+					'print-global-env 'get-hostlist 'get-hostkey 'deep-copy 'set-debug)))
   (if (and f flist)
       (if (eql f (car flist))
 	  (symbol-function f)
@@ -354,8 +360,17 @@
 
 
 
-(defun set-global (key val) (setf (gethash key *global-values*) val))
+(defun set-global (key val)
+  (if (equal *host-key* *master-host-key*)
+      (setf (gethash key *global-values*) val)
+    (blocking-request *master-host-key* "run"
+		      (list (list :lambda (make-env) (list 'x) (list 'define key val))
+			    1
+			    nil))))
+  
 
+
+;; FIXME: only works on master
 (defun print-global-env ()
   (format t "~%")
   (maphash #'(lambda (key val) (format t "key ~a val ~a~%" key val)) *global-values*)
@@ -384,28 +399,6 @@
     env))
 
 
-
-;; keep REMOTE_TYPE secret
-;; just need something unique to share between cluster nodes
-;;(let ((REMOTE_TYPE "c7ad5a0a-1f43-4756-8dc8-0cb4926318ec")
-;;      (datastore (make-hash-table)));
-;;  (defun remotep(item)
-;;    (and (consp item) (eql (car item) REMOTE_TYPE)))
-;;  (defun make-remote(item)
-;;    (let ((ref (list REMOTE_TYPE (gethostname) *port* (gensym))))
-;;      (setf (gethash (remote-sym ref) datastore) item)
-;;      ref))
-
-;; should not be used yet?
-;;  (defun set-remote(remote item)
-;;    (setf (gethash (remote-sym remote) datastore) item))
-
-;; check hostname, call remote host or fetch local
-;;  (defun remote-val(remote)
-;;    (gethash (remote-sym remote) datastore))
-;;  (defun remote-sym(remote)
-;;    (if (remotep remote) (cadddr remote))))
-
 (defun local-list (lst)
   (if (and lst (consp lst))
       (cons (car lst)
@@ -415,12 +408,12 @@
   (defun get-next-host ()
     (let* ((hosts (get-hostlist))
 	   (index (mod counter (length hosts))))
-      (setf counter (+ 1 counter))
+      (incf counter)
       (nth index hosts))))
 
 (defun do-dmap (f lst env)
   (let ((lst (local-list lst)))
-    (print lst)
+    (if (< 5 *debug*) (print lst))
     (let ((wait-list
 	   (map 'list
 		#'(lambda (arg)
@@ -431,22 +424,16 @@
 
 
 (defun do-progn (body env)
-  (car (last (map
-	      'list
+  (car (last (map 'list
 	      #'(lambda (expr) (deval expr env))
-	      body)
-	     )))
+	      body))))
 
 (defun do-let (expr env)
   (let ((vars (map 'list #'car (cadr expr)))
 	(values (map 'list #'(lambda (xpr) (deval (cadr xpr) env)) (cadr expr)))
-	(body (cddr expr))
-	)
+	(body (cddr expr)))
     (let ((env (extend-env vars values env)))
-      (do-progn body env)
-      )
-    )
-  )
+      (do-progn body env))))
 
 
 (defun do-def (expr env)
@@ -455,23 +442,22 @@
     (if (symbolp sym)
 	(set-global sym val)
       (progn (print (list "not a symbol" sym))
-	     nil)
-      )
-    )
-  )
-					; expr must be a local list
-(defun getargs(expr env) (map 'list #'(lambda (xpr) (deval xpr env)) expr))
+	     nil))))
 
-(defun getop(expr)
+
+;; expr must be a local list
+(defun getargs (expr env) (map 'list #'(lambda (xpr) (deval xpr env)) expr))
+
+(defun getop (expr)
   (car expr))
 
-					; (lambda (env) (arg1 arg2 ...) expr expr ... )
+;; (lambda env (arg1 [...]) expr [...])
 (defun get-lambda-params (func) (caddr func))
 (defun get-lambda-env (func) (cadr func))
 (defun get-lambda-body (func) (cdddr func))
 (defun fetch-remote (func) func nil)
 
-(defun do-apply(func args env)
+(defun do-apply (func args env)
   (cond
    ((lookup-primitive func)
     (apply (lookup-primitive func) args))
@@ -482,15 +468,11 @@
     (let ((params (get-lambda-params func))
 	  (body (get-lambda-body func)))
       (let ((env (extend-env params args (get-lambda-env func))))
-	;;	(car (last (map 'list #'(lambda (expr) (deval expr env)) body)))
-	(do-progn body env)
+	(do-progn body env))))
+   ;; default -- should throw error
+   (t nil)))
 
-	)))
-   (t nil) ; default -- should throw error
-   )
-  )
-
-(defun strip-quote(expr)
+(defun strip-quote (expr)
   (if (consp expr)
       (if (eql (car expr) 'quote)
 	  (cdr expr)
@@ -570,7 +552,7 @@
   (format t "~%> ")
   (finish-output))
 
-(defun copy-local (expr)
+(defun deep-copy (expr)
   (if (or (atom expr) (not expr))
       expr
     (if (eq (car expr) :stored)
@@ -578,11 +560,12 @@
 	(blocking-request (getf expr :stored) "fetch" (getf expr :key))
       (let ((ca (decons #'car expr))
 	    (cd (decons #'cdr expr)))
-	(cons (copy-local ca)
-	      (copy-local cd))))))
-  
+	(cons (deep-copy ca)
+	      (deep-copy cd))))))
+
 (defun local-print (expr)
-  (print (copy-local expr)))
+  (print (deep-copy expr))
+  (force-output))
 
 (defun dlisp(&optional (env (make-env)))
   (start-server *host* *port*)
@@ -594,3 +577,4 @@
        (local-print (deval expr env))))))
 
 
+(dlisp)
