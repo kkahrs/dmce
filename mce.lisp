@@ -417,7 +417,7 @@
        (*global-values-lock*)
        (setf (gethash key *global-values*) val))
     (blocking-request *master-host-key* "run"
-		      (list (list :lambda (make-env) (list 'x) (list 'define key val))
+		      (list (list :lambda (make-env) (list 'x) (list 'define key (list 'quote (lazy-marshall val))))
 			    1
 			    nil))))
 
