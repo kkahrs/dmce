@@ -435,7 +435,7 @@
       (nth index hosts))))
 
 (defun do-dmap (f lst env)
-    (if (< 5 *debug*) (print lst))
+    (if (< 2 *debug*) (print (list f lst)))
   (let ((lst (local-list lst)))
     (if (< 5 *debug*) (print lst))
     (let ((wait-list
@@ -443,6 +443,12 @@
 		#'(lambda (arg)
 		    (launch-job (get-next-host) f arg env))
 		lst)))
+      (if (< 3 *debug*) (format t "wait list ~S~%"
+				(map 'list #'(lambda (wait)
+					       (list (getf wait :key)
+						     (getf wait :returned)
+						     (getf wait :return)))
+				     wait-list)))
       (map 'list #'(lambda (wait) (await-response wait)) wait-list))))
 
 
@@ -473,7 +479,11 @@
 
 
 ;; expr must be a local list
-(defun getargs (expr env) (map 'list #'(lambda (xpr) (deval xpr env)) expr))
+(defun getargs (expr env)
+  (if (< 4 *debug*) (format t "getargs called with ~S~%" expr))
+  (let ((args (map 'list #'(lambda (xpr) (deval xpr env)) expr)))
+    (if (< 4 *debug*) (format t "getargs returns ~S~%" args))
+    args))
 
 (defun getop (expr)
   (car expr))
@@ -554,7 +564,7 @@
 
 
 (defun deval (expr env)
-  (if (< 8 *debug*) (format t "calling deval with ~S in ~S~%" expr env))
+  (if (< 6 *debug*) (format t "calling deval with ~S in ~S~%" expr env))
   (cond
    ((atom expr)
     (cond
@@ -589,6 +599,8 @@
 	  (do-dmap (car args) (cadr args)  env)))
        ((eql op 'eval)
 	(deval (deval (cadr expr) env) env))
+       ((eql op 'apply)
+	(do-apply (deval (cadr expr) env) (car (getargs (cddr expr) env)) env))
        (t (do-apply (deval op env) (getargs (cdr expr) env) env)))))
 					; should never be reached?
    (t (print "could not eval") expr)))
