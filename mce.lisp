@@ -63,7 +63,7 @@
 (declaim (ftype function handle-message))
 (declaim (ftype function do-apply))
 
-(defparameter *debug* 9)
+(defparameter *debug* 3)
 (defparameter *connections-lock* (bt:make-lock))
 (defparameter *connections* (make-hash-table :test #'equal))
 (defparameter *locks* (make-hash-table :test #'equal))
@@ -76,7 +76,7 @@
 
 (let ((debug-output-lock (bt:make-lock "debug-output-lock")))
   (defmacro dbg (lvl &body body)
-    `(if (<= ,lvl *debug*) (bt:with-lock-held (,debug-output-lock) ,@body))))
+    `(if (<= ,lvl *debug*) (bt:with-lock-held (,debug-output-lock) ,@body (force-output)))))
 
 
 ;; ("sbcl" "localhost" "8000")
@@ -129,11 +129,14 @@
       (lazy-marshall val))))
 
 (defun lookup-global (sym)
+  (dbg 1 (format t "looking up global ~S~%" sym))
   (if (and sym (not (eq sym t)))
       (if (equal *host-key* *master-host-key*)
-	  (gethash sym *global-values*)
-	(blocking-request *master-host-key* "lookup" (list :sym sym :env nil))))
-  (eq sym t))
+	  (progn
+	    (dbg 1 (format t "really looking up global ~S~%" sym))
+	    (gethash sym *global-values*))
+	(blocking-request *master-host-key* "lookup" (list :sym sym :env nil)))
+    (eq sym t)))
 
 (defun lookup-remote (sym env)
   (blocking-request (getf env :location) "lookup" (list :sym sym :env env)))
@@ -147,7 +150,7 @@
     (dbg 0 (print "tried to lookup reserved keyword"))
     nil)
    (t
-    (if (and env sym)
+    (if (and sym env)
 	(let ((id (getf env :frame))
 	      (hostspec (getf env :location)))
 	  (if (equal hostspec *host-key*)
@@ -194,7 +197,7 @@
 
 (defun receive-response(key body)
   (let ((wait (gethash key *pending-requests*)))
-    (dbg 1 (format t "got response for request ~S~%" (list key body)))
+    (dbg 3 (format t "got response for request ~S~%" (list key body)))
     (if (not wait) (print "failed to lookup wait obj for key"))
     (let ((condition (getf wait :condition))
 	  (lock (getf wait :lock)))
@@ -462,6 +465,7 @@
   (if (equal *host-key* *master-host-key*)
       (bt:with-lock-held
        (*global-values-lock*)
+       (dbg 1 (format t "setting ~S to ~S~%" key val))
        (setf (gethash key *global-values*) val))
     (blocking-request *master-host-key* "run"
 		      (list (list :lambda (make-env) (list 'x) (list 'define key (list 'quote (lazy-marshall val))))
@@ -517,7 +521,9 @@
 
 (defun do-let (expr env)
   (dbg 5 (format t "do-let ~S ~S~%" expr env))
-  (let ((bindings-list (local-list (cadr expr))))
+  ;; FIXME: deep-copy probably too aggressive here -- maybe give it optional depth arg?
+  (let ((bindings-list (deep-copy (cadr expr))))
+    (dbg 7 (format t "bindings-list ~S~%" bindings-list))
     (let ((vars (map 'list #'car bindings-list))
 	  (values (map 'list #'(lambda (xpr) (deval (cadr xpr) env)) bindings-list))
 	  (body (cddr expr)))
@@ -526,12 +532,15 @@
 
 
 (defun do-def (expr env)
-  (let ((sym (cadr expr))
-	(val (deval (caddr expr) env)))
-    (if (symbolp sym)
-	(set-global sym val)
-      (progn (dbg 0 (print (list "not a symbol" sym)))
-	     nil))))
+  ;; FIXME: don't want to do deep-copy on expr
+  (dbg 1 (format t "trying define ~S~%" expr))
+  (let ((expr (deep-copy expr)))
+    (let ((sym (cadr expr))
+	  (val (deval (caddr expr) env)))
+      (if (symbolp sym)
+	  (set-global sym val)
+	(progn (dbg 0 (print (list "not a symbol" sym)))
+	       nil)))))
 
 
 '((:LAMBDA
@@ -575,11 +584,26 @@
 (defun get-lambda-env (func) (cadr func))
 (defun get-lambda-body (func) (cdddr func))
 
+(defun load-file (filename)
+  (with-open-file
+   (stream filename :direction :input :if-does-not-exist :error)
+   (let ((env (make-env))
+	 (counter 0))
+     (loop
+      (let ((expr (read stream nil :eof)))
+	(dbg 2 (format t "read ~S from file ~S~%" expr filename))
+	(if (or (eq expr :eof))
+	    (progn (dbg 1 (format t "reached end of file ~S after ~S statements~%" filename counter))
+		   (return nil))
+	  (deval expr env)))
+      (incf counter)))))
+
 
 (defun lookup-primitive (f &optional
 			   (flist (list 'not '> '< '= '+ '- '* '/
 					'atom 'eq 'cons 'list 'print
-					'print-global-env 'get-hostlist 'get-hostkey 'deep-copy 'dequal 'set-debug)))
+					'deep-copy 'dequal 'load-file
+					'print-global-env 'get-hostlist 'get-hostkey 'set-debug)))
   (if (and f flist)
       (if (eql f (car flist))
 	  (symbol-function f)
@@ -592,6 +616,7 @@
     (apply (lookup-primitive func) args))
    ((symbolp func)
     (cond
+     ((not func) (dbg 0 (format t "could not apply nil to ~S~%" args)))
      ((eq func 'eval)
       (deval (car args) env))
      ((or (eql func 'car) (eql func 'cdr))
@@ -642,14 +667,15 @@
 
 
 (defun deval (expr env)
-  (dbg 6 (format t "calling deval with ~S in ~S~%" expr env))
+  (dbg 3 (format t "calling deval with ~S in ~S~%" expr env))
   (cond
    ((atom expr)
-    (cond
-     ((lookup-primitive expr) expr)     
-     ((symbolp expr)
-      (lookup expr env))
-     (t expr)))
+    (if expr
+	(cond
+	 ((lookup-primitive expr) expr)
+	 ((symbolp expr)
+	  (lookup expr env))
+	 (t expr))))
    ((consp expr)
     (let ((expr (local-list expr)))
       (dbg 7 (format t "deval trying function? with ~S in ~S~%" expr env))
@@ -657,6 +683,7 @@
 	    ;; may be slightly inefficient when using and/or?
 	    (rest (local-list (cdr expr))))
 	(cond
+	 ((not op) (dbg 1 (format t "undefined function in ~S~%" expr)))
 	 ((or (eql op 'car) (eql op 'cdr))
 	  (let ((arg (car (getargs rest env))))
 	    (decons (symbol-function op) arg)))
@@ -702,7 +729,7 @@
   (start-server *host* *port*)
   (loop
    (prompt)
-   (let ((expr (read *STANDARD-INPUT* nil '(quit))))
+   (let ((expr (read *standard-input* nil '(quit))))
      (if (and (listp expr) (eql (car expr) 'quit) (not (cdr expr)))
 	 (return expr)
        (local-print (deval expr env))))))
