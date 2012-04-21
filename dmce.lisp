@@ -1,4 +1,4 @@
-;; research references
+;; references to this or similar ideas
 
 ;; multicomputer lisp interpreter
 ;; http://www.faqs.org/rfcs/rfc504.html mentions idea
@@ -7,8 +7,8 @@
 ;; http://ditec.um.es/~jmgarcia/papers/sigplan92.ps distributed pascal
 
 ;; distributed lisp interpreter
-;; http://ieeexplore.ieee.org/xpl/freeabs_all.jsp?arnumber=500616 seems fairly close but uses an underlying architecture for distribution, not built-in
-;; paralation (^) seems to be for data-parallel not execution-parallel. current implementation is kind of data-parallel oriented,
+;; http://ieeexplore.ieee.org/xpl/freeabs_all.jsp?arnumber=500616 paralation seems to be for data-parallel not execution-parallel.
+;; current implementation is kind of data-parallel oriented,
 ;; but the addition of thread primitives appears difficult in the paralation model however not in this one
 
 ;; arc language forums
@@ -21,28 +21,23 @@
 ;; data types: atom (symbol number string) cons
 
 ;; primitives:
-;; atom eq cons car cdr
-;; + - * /
+;; atom eq cons
 ;; list print
-;; print-global-env
-;; make-thread wait-thread ????
+;; + - * / < > =
+;; ;; extra native utils
+;; print-global-env get-hostlist get-hostkey set-debug
+;; deep-copy dequal load-file
 
 ;; special forms:
 ;; def let lambda and or cond quote eval apply
 
-;; local implementation
-;; map
-;; deep-copy
-
 ;; NEW!
-;; special form: dmap
-
-;; all bindings must be remote references (even for local) ???
+;; special form: dmap ;; distributed map executes (f arg) across all available hosts in parallel
 
 ;; using install of usocket from quicklisp http://beta.quicklisp.org/quicklisp.lisp
 ;; installed in ~/quicklisp
 
-;; quicklisp/dists/quicklisp/software/usocket-0.5.4/backend/sbcl.lisp
+;; quicklisp/dists/quicklisp/software/usocket-0.5.5/backend/sbcl.lisp
 ;; commented out :serve-events nil
 
 (ql:quickload "usocket")
@@ -78,7 +73,10 @@
   (defmacro dbg (lvl &body body)
     `(if (<= ,lvl *debug*) (bt:with-lock-held (,debug-output-lock) ,@body (force-output)))))
 
-
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; NON-PORTABLE CODE -- sbcl only
+;; need to fix command line option parsing to run on other cl implementations
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;; ("sbcl" "localhost" "8000")
 (let* ((argc (length sb-ext:*posix-argv*))
        (argv sb-ext:*posix-argv*)
@@ -108,7 +106,7 @@
 
 
 
-
+;; only first cons of a list needs to be sent for remote function call
 (defun lazy-marshall (item)
   (if (and item (consp item) (not (equal :lambda (car item))))
       (let ((ca (store-local (car item)))
@@ -141,6 +139,7 @@
 (defun lookup-remote (sym env)
   (blocking-request (getf env :location) "lookup" (list :sym sym :env env)))
 
+;; lookup sym starting at env, following env linked list to other hosts if necessary
 (defun lookup (sym env)
   (cond
    ((eq sym :stored)
@@ -253,7 +252,8 @@
   "nothing currently handles case of disconnecting host"
   (map 'list #'peer-connect hosts))
 
-
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; dispatch server function for receiving distributed memory and execution requests
 (defun handle-message (hostspec expr)
   (let ((op (getf expr :op))
 	(key (getf expr :key))
@@ -280,6 +280,7 @@
      ((equal op "response") (receive-response key body))
      ((equal op "hosts") (refresh-hostlist body))
      (t (dbg 1 (print "invalid op"))))))
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 
 
 
@@ -394,6 +395,7 @@
 (defun get-hostkey () *host-key*)
 (defun set-debug (d) (setf *debug* d))
 
+
 (defun fetch-remote (item)
   (if (and item (consp item) (eq :stored (car item)))
       (let ((hostspec (getf item :stored))
@@ -404,6 +406,7 @@
     item))
 
 
+;; car/cdr including fetch and unwrap of values from other hosts
 (defun decons (op arg)
   (if (consp arg)
       (let ((val (funcall op arg)))
@@ -460,7 +463,8 @@
     (map 'list #'(lambda (key val) (put-to-env key val env)) keys values)
     env))
 
-
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; currently all global variables are stored on first host
 (defun set-global (key val)
   (if (equal *host-key* *master-host-key*)
       (bt:with-lock-held
@@ -471,8 +475,9 @@
 		      (list (list :lambda (make-env) (list 'x) (list 'define key (list 'quote (lazy-marshall val))))
 			    1
 			    nil))))
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 
-
+;; copy contents of distributed list to local memory
 (defun local-list (lst)
   (if (eq (car lst) :stored)
       (local-list (fetch-remote lst))
@@ -480,6 +485,7 @@
 	(cons (car lst)
 	      (local-list (decons #'cdr lst))))))
 
+;; simple round-robin host selector
 (let ((counter 0))
   (defun get-next-host ()
     (let* ((hosts (get-hostlist))
@@ -487,29 +493,22 @@
       (incf counter)
       (nth index hosts))))
 
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; implementation of dmap special form
+
 (defun do-dmap (f lst env)
-    (dbg 5 (print (list f lst)))
   (let ((lst (local-list lst)))
-    (dbg 5 (print lst))
     (let ((wait-list
 	   (map 'list
 		#'(lambda (arg)
 		    (launch-job (get-next-host) f arg env))
 		lst)))
-      (dbg 3 (format t "wait list ~S~%"
-				(map 'list #'(lambda (wait)
-					       (list (getf wait :key)
-						     (getf wait :returned)
-						     (getf wait :return)))
-				     wait-list)))
       (map 'list #'(lambda (wait)
-		     (dbg 3 (format t "waiting for ~S~%" (list (getf wait :key)
-							       (getf wait :job)
-							       (getf wait :returned)
-							       (getf wait :return))))
 		     (await-response wait)) wait-list))))
 
 
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 
 
 (defun do-progn (body env)
@@ -542,25 +541,6 @@
 	(progn (dbg 0 (print (list "not a symbol" sym)))
 	       nil)))))
 
-
-'((:LAMBDA
-  (:FRAME "localhost:8001.881" :LOCATION
-	  (:HOST "localhost" :PORT 8001)
-	  :PARENT
-	  (:FRAME "localhost:8000.851"
-		  :LOCATION
-		  (:HOST "localhost" :PORT 8000)
-		  :PARENT NIL))
-  :STORED (:HOST "localhost" :PORT 8000)
-  :KEY "localhost:8000.986")
- (3 :STORED
-    (:HOST "localhost" :PORT 8001) :KEY
-    "localhost:8001.959")
- (:FRAME "localhost:8001.881" :LOCATION
-	 (:HOST "localhost" :PORT 8001) :PARENT
-	 (:FRAME "localhost:8000.851" :LOCATION
-		 (:HOST "localhost" :PORT 8000)
-		 :PARENT NIL)))
 
 
 
@@ -659,7 +639,7 @@
     t))
 
 (defun do-if(expr env)
-					; predicate then else
+  ;; predicate then else
   (let ((pred (deval (car expr) env)))
     (if pred
 	(deval (cadr expr) env)

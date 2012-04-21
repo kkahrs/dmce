@@ -12,7 +12,7 @@
 
 (define length
   (lambda (lst)
-    (if (lst)
+    (if lst
 	(+ 1 (length (cdr lst)))
       0)))
 
@@ -26,7 +26,7 @@
 	  lst1
 	(if (comparator (car lst1) (car lst2))
 	    (cons (car lst1) (mergelists (cdr lst1) lst2 comparator))
-	  (cons (car lst2) (mergelists lst1 (cdr lst2))))))))
+	  (cons (car lst2) (mergelists lst1 (cdr lst2) comparator)))))))
 
 (define mergesort
   (lambda (lst comparator)
@@ -35,10 +35,11 @@
 	  (if (= 1 len)
 	      lst
 	    (if (= 2 len)
-		(mergelists (list (car lst)) (cdr lst))
+		(mergelists (list (car lst)) (cdr lst) comparator)
 	      (let ((split-lst (split lst)))
-		(mergelists (mergesort (car split-lst))
-			    (mergesord (car (cdr split-lst)))))))))))
+		(mergelists (mergesort (car split-lst) comparator)
+			    (mergesort (car (cdr split-lst)) comparator)
+			    comparator))))))))
 
 
 (define sublist
@@ -46,7 +47,7 @@
     (if (not lst)
 	lst
       (if (< counter start)
-	  (sublist (cdr l) start stop (+ counter 1))
+	  (sublist (cdr lst) start stop (+ counter 1))
 	(if (> counter stop)
 	    nil
 	  (cons (car lst) (sublist (cdr lst) start stop (+ counter 1))))))))
@@ -60,12 +61,9 @@
 	(if (= len 1)
 	    (list lst nil)
 	  (list (sublist lst 1 (/ len 2) 1)
-		(sublist lst (+ (/ len 2) 1) len 1)))))))
+		(sublist lst (+ (/ len 2) 1/2) len 1)))))))
 
 
-(define sort-on-keys
-  (lambda (key-comparator input)
-    input))
 
 
 ; input in the form ((keyin1 valin1) (keyin2 valin2) ...)
@@ -83,11 +81,29 @@
       (dmap rf collated))))
 
 
+(define make-key-comparator
+  (lambda (comp)
+    (lambda (arg1 arg2)
+      (let ((key1 (car arg1))
+	    (key2 (car arg2)))
+	(comp key1 key2)))))
+
+(define collapse-on-keys
+  (lambda (elements current-key output)
+    (if elements
+	(let ((element (car elements)))
+	  (let ((key (car element))
+		(val (car (cdr element))))
+	    (if (dequal key current-key)
+		(collapse-on-keys (cdr elements) key (foo))
+	      foo)))
+      output)))
+
 ; input in the form of ((key1 val1) (key2 val2) (key1 val3) ...)
 ; output in the form of ((key1 (val1 val3 ...)) (key2 (val2 ...)) ...)
 (define collate
   (lambda (key-comparator input)
-    (collapse-on-keys (sort-on-keys key-comparator input))))
+    (collapse-on-keys (merge-sort input keycomparator) nil nil)))
 
 
 (define mapreduce
@@ -96,5 +112,5 @@
 
 
 
-(mapreduce mapper (list (list 1 3) (list 4 56)) reducer comparator)
+;(mapreduce mapper (list (list 1 3) (list 4 56)) reducer comparator)
 

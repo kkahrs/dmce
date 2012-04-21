@@ -1,5 +1,6 @@
 
 
+(set-debug 0)
 
 (print
 (dmap (lambda (arg) (eval arg)) 
