@@ -1,0 +1,26 @@
+A distributed memory and execution lisp interpreter implemented in common lisp using sbcl.
+Global symbols and host-host introductions are performed by a master node. All other actions
+can be done from any host -- definition of variables and functions; creation of lexical
+closures; launch distributed jobs; etc...
+
+Single threads of execution run in a single sbcl image. However using the special "dmap"
+(analog of traditional "map" function) form, execution of the supplied function will be
+distributed across all available nodes in the cluster, and the results collected into a list.
+
+Unfortunately, the interpreter is NOT sufficient for production use, as it completely lacks
+garbage collection, rewritable memory (e.g. setf), and node failure handling.
+
+
+
+STARTUP
+1. Start the master node
+sbcl --load dmce.lisp [masterhostname (localhost)] [masterport (8000)]
+
+2. Start any additional nodes desired
+sbcl --load dmce.lisp <myhostname> <myport> <masterhostname> <masterport>
+
+USAGE
+The lisp interpreter is based significantly on scheme. Examples and tests may be found in
+languagetest.lisp
+mapreduce.lisp
+mapreducetest.lisp
