@@ -1,6 +1,6 @@
 A distributed memory and execution lisp interpreter implemented in common lisp using sbcl.
-Global symbols and host-host introductions are performed by a master node. All other actions
-can be done from any host -- definition of variables and functions; creation of lexical
+Global symbols and node-node introductions are performed by a master node. All other actions
+can be done from any node -- definition of variables and functions; creation of lexical
 closures; launch distributed jobs; etc...
 
 Single threads of execution run in a single sbcl image. However using the special "dmap"
@@ -24,3 +24,21 @@ The lisp interpreter is based significantly on scheme. Examples and tests may be
 languagetest.lisp
 mapreduce.lisp
 mapreducetest.lisp
+
+
+COMPLEX TESTS
+
+Demonstration of portable closures:
+on one node define a closure, e.g.
+(let ((x 3)) (define foo (lambda (y) (+ x y))))
+
+test similar to
+(foo 5) ;; -> 8
+
+On another node repeating the test should give the same result, using the lexical binding
+of x from the original node.
+
+BUGS
+No serious bugs currently known; most behavior observed is expected. Enough correct behavior
+is observed to demonstrate the usefulness of a distributed lisp interpreter.
+

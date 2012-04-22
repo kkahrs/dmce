@@ -557,7 +557,7 @@
       args)))
 
 (defun getop (expr)
-  (car expr))
+  (decons #'car expr))
 
 ;; (lambda env (arg1 [...]) expr [...])
 (defun get-lambda-params (func) (caddr func))
@@ -593,14 +593,14 @@
 (defun do-apply (func args env)
   (cond
    ((lookup-primitive func)
-    (apply (lookup-primitive func) args))
+    (apply (lookup-primitive func) (deep-copy args)))
    ((symbolp func)
     (cond
      ((not func) (dbg 0 (format t "could not apply nil to ~S~%" args)))
      ((eq func 'eval)
-      (deval (car args) env))
+      (deval (decons #'car args) env))
      ((or (eql func 'car) (eql func 'cdr))
-      (decons (symbol-function func) (car args)))
+      (decons (symbol-function func) (decons #'car args)))
      (t (do-apply (lookup func env) args env))))
    
    ((and (listp func) ; the body of a func -- should be (lambda (...) ...)
