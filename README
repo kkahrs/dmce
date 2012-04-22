@@ -2,8 +2,7 @@ A distributed memory and execution lisp interpreter implemented in common lisp u
 
 Single threads of execution run in a single sbcl image. However using the special "dmap" (analog of traditional "map" function) form, execution of the supplied function will be distributed across all available nodes in the cluster, and the results collected into a list.
 
-Unfortunately, the interpreter is NOT sufficient for production use, as it completely lacks
-garbage collection, rewritable memory (e.g. setf), and node failure handling.
+Unfortunately, the interpreter is NOT sufficient for production use, as it completely lacks garbage collection, rewritable memory (e.g. setf), and node failure handling.
 
 
 
