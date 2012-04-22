@@ -91,14 +91,10 @@
   (lambda (elements)
     (let ((element (car elements)))
       (let ((key (car element)))
-        (print element)
-        (print key)
 	(collapse-on-keys-real elements key nil nil)))))
 
 (define collapse-on-keys-real
   (lambda (elements current-key current-list output)
-    (print "collapse-on-keys-real")
-    (print (list elements current-key current-list output))
     (if elements
 	(let ((element (car elements)))
 	  (let ((key (car element))
