@@ -1,5 +1,4 @@
 ;; some code adapted from http://cs.gmu.edu/~white/CS363/Scheme/SchemeSamples.html (sorting)
-
 (define map
   (lambda (f lst)
     (if (and f lst)
@@ -89,25 +88,45 @@
 	(comp key1 key2)))))
 
 (define collapse-on-keys
-  (lambda (elements current-key output)
+  (lambda (elements)
+    (let ((element (car elements)))
+      (let ((key (car element)))
+        (print element)
+        (print key)
+	(collapse-on-keys-real elements key nil nil)))))
+
+(define collapse-on-keys-real
+  (lambda (elements current-key current-list output)
+    (print "collapse-on-keys-real")
+    (print (list elements current-key current-list output))
     (if elements
 	(let ((element (car elements)))
 	  (let ((key (car element))
 		(val (car (cdr element))))
 	    (if (dequal key current-key)
-		(collapse-on-keys (cdr elements) key (foo))
-	      foo)))
-      output)))
+		(collapse-on-keys-real
+                 (cdr elements)
+                 key
+                 (cons val current-list)
+                 output)
+	      (collapse-on-keys-real
+               (cdr elements)
+               key
+               (list val)
+               (cons (list current-key current-list) output)))))
+	(if (or current-key current-list)
+            (cons (list current-key current-list) output)
+          output))))
 
 ; input in the form of ((key1 val1) (key2 val2) (key1 val3) ...)
 ; output in the form of ((key1 (val1 val3 ...)) (key2 (val2 ...)) ...)
 (define collate
   (lambda (key-comparator input)
-    (collapse-on-keys (merge-sort input keycomparator) nil nil)))
+    (collapse-on-keys (mergesort input key-comparator))))
 
 
 (define mapreduce
-  (lambda (map-function kvps reduce-function key-comparator)
+  (lambda (kvps map-function reduce-function key-comparator)
     (mrreduce reduce-function key-comparator (mrmap map-function kvps))))
 
 

@@ -580,7 +580,7 @@
 
 
 (defun lookup-primitive (f &optional
-			   (flist (list 'not '> '< '= '+ '- '* '/
+			   (flist (list 'not '> '< '= '+ '- '* '/ 'mod
 					'atom 'eq 'cons 'list 'print
 					'deep-copy 'dequal 'load-file
 					'print-global-env 'get-hostlist 'get-hostkey 'set-debug)))
