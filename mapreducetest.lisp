@@ -7,17 +7,20 @@
 (dequal (list 1 2 3 4 5 6) (mergelists (list 1 3 5) (list 2 4 6) <))
 
 ;; common functions for map/reduce calls
-(define reducer (lambda (element)
-                  (let ((key (car element))
-                        (vals (car (cdr element))))
-                    (list key (apply + vals)))))
-
-(define mapper (lambda (element)
-                 (let ((key (car element))
-                       (val (car (cdr element))))
-                   (let ((sq (* val val))) (list key sq)))))
+(define mapper
+  (lambda (element)
+    (let ((key (car element))
+          (val (car (cdr element))))
+      (let ((sq (* val val))) (list key sq)))))
 
 (define comparator (make-key-comparator <))
+
+(define reducer
+  (lambda (element)
+    (let ((key (car element))
+          (vals (car (cdr element))))
+      (list key (apply + vals)))))
+
 
 ;; testing intermediate input prepration
 (define input (quote ((1 2) (2 7) (1 3) (1 4) (1 5) (2 6) (2 8) (3 1) (4 3) (3 33) (4 4))))
@@ -29,9 +32,7 @@
 
 ;; running unit tests of map and reduce
 (print "mapping")
-
 (define mapped (mrmap mapper input))
-
 (print mapped)
 
 (print "collating")

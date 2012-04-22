@@ -1,11 +1,6 @@
-A distributed memory and execution lisp interpreter implemented in common lisp using sbcl.
-Global symbols and node-node introductions are performed by a master node. All other actions
-can be done from any node -- definition of variables and functions; creation of lexical
-closures; launch distributed jobs; etc...
+A distributed memory and execution lisp interpreter implemented in common lisp using sbcl. Global symbols and node-node introductions are performed by a master node. All other actions can be done from any node -- definition of variables and functions; creation of lexical closures; launch distributed jobs; etc...
 
-Single threads of execution run in a single sbcl image. However using the special "dmap"
-(analog of traditional "map" function) form, execution of the supplied function will be
-distributed across all available nodes in the cluster, and the results collected into a list.
+Single threads of execution run in a single sbcl image. However using the special "dmap" (analog of traditional "map" function) form, execution of the supplied function will be distributed across all available nodes in the cluster, and the results collected into a list.
 
 Unfortunately, the interpreter is NOT sufficient for production use, as it completely lacks
 garbage collection, rewritable memory (e.g. setf), and node failure handling.
@@ -21,6 +16,7 @@ sbcl --load dmce.lisp <myhostname> <myport> <masterhostname> <masterport>
 
 USAGE
 The lisp interpreter is based significantly on scheme. Examples and tests may be found in
+
 languagetest.lisp
 mapreduce.lisp
 mapreducetest.lisp
@@ -35,10 +31,8 @@ on one node define a closure, e.g.
 test similar to
 (foo 5) ;; -> 8
 
-On another node repeating the test should give the same result, using the lexical binding
-of x from the original node.
+On another node repeating the test should give the same result, using the lexical binding of x from the original node.
 
 BUGS
-No serious bugs currently known; most behavior observed is expected. Enough correct behavior
-is observed to demonstrate the usefulness of a distributed lisp interpreter.
+No serious bugs currently known; most behavior observed is expected. Enough correct behavior is observed to demonstrate the usefulness of a distributed lisp interpreter.
 
